@@ -4,7 +4,7 @@ import sys
 
 # Constants
 size = width, height = (800, 800)
-cell_count = cells_horizontal, cells_vertical = (50, 50)
+cell_count = cells_horizontal, cells_vertical = (15, 15)
 cell_size = cell_width, cell_height = (width // cells_horizontal, height // cells_vertical)
 
 # Colors
@@ -28,7 +28,7 @@ def setup_grid():
 
     return grid
 
-def display_grid(screen, grid):
+def display_grid(screen, grid, font, insert_modes, mode):
     # Set the background to black
     screen.fill(black)
     # Loop through all elements in the grid
@@ -42,13 +42,61 @@ def display_grid(screen, grid):
                 square_color = light_green
             elif square.finish:
                 square_color = dark_green
+            elif square.visited:
+                square_color = blue
+            elif square.current:
+                square_color = purple
 
             # Draw the square in the appropriate color
             pygame.draw.rect(screen, square_color, (i * cell_width, j * cell_height, cell_width, cell_height), 0)
             # Draw square outline
             pygame.draw.rect(screen, black, (i * cell_width, j * cell_height, cell_width, cell_height), 1)
+    
+    # Overlay the current insert mode
+    text = font.render(f"Insert mode: {insert_modes[mode]}", True, blue)
+    screen.blit(text, (10, 5))
+
     # Update the display
     pygame.display.update()
+
+def check_user_input():
+    """
+    Checks for user input and returns a dictionary
+    containing information about certain keypresses 
+    and whether or not the mouse state has been toggled.
+    Returns:
+    user_input -> Dict[Bool]
+    """
+    user_input = {
+        "MTOGGLE": False,
+        "ENTER": False, 
+        "LCTRL": False, 
+        "DELETE": False
+    }
+
+    # Check system events
+    for event in pygame.event.get():
+        # Quit if desired
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            sys.exit(0)
+
+        # Check for key presses
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_RETURN:
+                user_input["ENTER"] = True
+            elif event.key == pygame.K_LCTRL:
+                user_input["LCTRL"] = True
+            elif event.key == pygame.K_DELETE:
+                user_input["DELETE"] = True
+
+        # If mouse is clicked or released
+        if event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.MOUSEBUTTONUP:
+            user_input["MTOGGLE"] = True
+    
+    # Return the dictionary
+    return user_input
+        
 
 def check_drawing_mode_toggle():
     # Check system events
@@ -88,15 +136,55 @@ def set_obstacles(grid):
     # Set the selected squares to be obstacles
     grid[y][x].obstacle = True
 
+def set_start(grid, start_pos_old=None):
+    # Get mouse position
+    x, y = mouse_to_coord()
+
+    # If another start exists, remove it
+    if start_pos_old != None:
+        x_old, y_old = start_pos_old
+        grid[y_old][x_old].start = False
+
+    # Set the selected square to be the start
+    grid[y][x].start = True
+    
+    # return the new start position
+    return (x, y)
+
+def set_finish(grid, finish_pos_old=None):
+    # Get mouse position
+    x, y = mouse_to_coord()
+
+    # If another finish exists, remove it
+    if finish_pos_old != None:
+        x_old, y_old = finish_pos_old
+        grid[y_old][x_old].finish = False
+
+    # Set the selected square to be the finish
+    grid[y][x].finish = True
+    
+    # return the new finish position
+    return (x, y)
+
+def erase(grid):
+    # Get mouse position
+    x, y = mouse_to_coord()
+
+    # Reset the type of the square
+    grid[y][x].reset_type()
+
 
 class Square:
+    # list to keep track of which squares / nodes should be analyzed in 
+    # the next iteration of the algorithm 
+    up_next = []
     # 2d list to keep track of visited squares /  nodes
     visited = [[False for _ in range(cells_horizontal)] for _ in range(cells_vertical)]
 
     def __init__(self, x, y):
         # location
         self.x = x
-        self.y = x
+        self.y = y
         # type
         self.obstacle = False
         self.start = False
@@ -113,19 +201,32 @@ class Square:
     def __str__(self):
         return f"Square() x: {self.x}, y: {self.y}, obstacle: {self.obstacle}"
 
+    def reset_type(self):
+        # reset square type
+        self.obstacle = False
+        self.start = False
+        self.finish = False
+
+    def add_to_up_next(self):
+        Square.up_next.append((self.x, self.y))
+    
+    @classmethod
+    def clear_up_next(cls):
+        cls.up_next = []
 
 
-def nearest_neighbor_distance(grid, pos):
+
+def update_nearest_neighbors(grid, pos):
     """
     Takes the pos of a node and updates the distance 
-    attribute on all of its unchecked neighboring nodes
+    attribute on all of its unvisited neighboring nodes
     that are not obstacles.
     """
     x, y = pos
-    current_node = grid[y][x]
-    current_distance = current_node.distance
+    node = grid[y][x]
+    current_distance = node.distance
     # vectors from any given node to all its possible neighbors 
-    vectors_to_neighbors = ((1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1))
+    vectors_to_neighbors = ((1, 0), (0, -1), (-1, 0), (0, 1))
     # Calculate nearest neighbor distance for each neighbor
     for vector in vectors_to_neighbors:
         dx, dy = vector
@@ -136,20 +237,62 @@ def nearest_neighbor_distance(grid, pos):
             # Unless it is an obstacle or has been visited, update its distance attribute
             if not neighbor.obstacle and not neighbor.visited:
                 neighbor.distance = min(neighbor.distance, current_distance + 1)
+                # Add the neighbor to Square.up_next
+                neighbor.add_to_up_next()
     
     # Count the current node as visited and update Square.visited to reflect this
-    current_node.visited = True
+    node.visited = True
     Square.visited[y][x] = True
 
-def dijkstra(start_node):
+def dijkstra(screen, grid, start_node_pos, stop_node_pos, font, insert_modes, mode):
+    # list to keep track of current nodes
+    current_nodes_pos = [start_node_pos]
+
+    finished = False
+    while not finished:
+        # While the algorithm is not finished, loop through
+        # all current nodes and update their neighbors
+
+        # Usually there would have to be a check here to select the
+        # unvisited node with the smallest tentative distance but the
+        # distance between all nodes is 1 so they will all have an 
+        # equal tentative distancd on each iteration
+        for node_pos in current_nodes_pos:
+            # Set the node to current
+            x, y = node_pos 
+            node = grid[y][x] 
+            node.current = True
+            # Update its neighbors
+            update_nearest_neighbors(grid, node_pos)
+
+            # Update the screen
+            display_grid(screen, grid, font, insert_modes, mode)
+
+            # Change the current nodes current attribute to false
+            node.current = False
+
+        # Get the positions of the nodes to be iterated over next
+        current_nodes_pos = Square.up_next
+        Square.clear_up_next()
+
+        # Check if the target node has been found (i.e it is in the 
+        # list of nodes to be analyzed next)
+        if stop_node_pos in current_nodes_pos:
+            finished = True
+        # stop_x, stop_y = stop_node_pos
+        # if Square.visited[stop_y][stop_x] == True:
+        #     finished = True
+            
+    
 
 
 def main():
 
-    # Setup the screen
+    # Setup the screen and set font type
     screen = pygame.display.set_mode(size)
     pygame.display.set_caption("Path Finding")
-
+    font = pygame.font.SysFont("Times New Roman", 30, True)
+    
     # Setup the grid
     grid = setup_grid()
     
@@ -159,44 +302,50 @@ def main():
     insert_modes = ("obstacle", "start", "stop", "erase")
     mode = 0 
 
-
-
-    # FIX - added temporary start and finish fields
-    start_pos = start_x, start_y = (3, 4)
-    finish_pos = finish_x, finish_y = (35, 42)
-
-    start = grid[start_y][start_x]
-    finish = grid[finish_y][finish_x]
-    # set start and finish node settings
-    start.start = True
-    finish.finish = True 
-
-    start.distance = 0
-    start.current = True
-
-
-
+    start_pos = None
+    finish_pos = None
 
     while not end_program:
-        for event in pygame.event.get():
-            # Check for quit
-            if event.type == pygame.QUIT:
-                end_program = True
+        selection_complete = False
+        while not selection_complete:
+            # Display the grid
+            display_grid(screen, grid, font, insert_modes, mode)
 
-        # Check for a toggle of insert mode
-        #print(type(pygame.K_LCTRL)) # returns int: 306
-        # print(pygame.key)   
-       
-        # Display the grid
-        display_grid(screen, grid)
+            # Get user input
+            user_input = check_user_input()
 
-        # Check for a toggle of drawing mode 
-        if check_drawing_mode_toggle():
-            drawing_mode = not drawing_mode            
+            # Check for a LCTRL keypress 
+            if user_input["LCTRL"]:
+                # toggle insert mode
+                mode = (mode + 1) % len(insert_modes) 
+            # Check for a mouse press or release
+            if user_input["MTOGGLE"]:
+                # toggle drawing mode
+                drawing_mode = not drawing_mode   
+            # Check for Enter keypress 
+            if user_input["ENTER"]:
+                print("Start algorithm")
+            # Check for Delete keypress 
+            if user_input["DELETE"]:
+                print("Reset screen")       
 
-        # If drawing mode is enabled set the obstacles
-        if drawing_mode and insert_modes[mode] == "obstacle":
-            set_obstacles(grid)
+            # If drawing mode is enabled set selected squares to appropriate
+            # selection.
+            if drawing_mode:
+                if insert_modes[mode] == "obstacle":
+                    set_obstacles(grid)
+                elif insert_modes[mode] == "start":
+                    start_pos = set_start(grid, start_pos)
+                elif insert_modes[mode] == "stop":
+                    finish_pos = set_finish(grid, finish_pos)
+                elif insert_modes[mode] == "erase":
+                    erase(grid)
+
+            # Run the algorithm when Enter key is pressed
+            if user_input["ENTER"]:
+                selection_complete = True
+
+        dijkstra(screen, grid, start_pos, finish_pos, font, insert_modes, mode)
         
     # End program
     pygame.quit()
